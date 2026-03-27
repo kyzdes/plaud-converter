@@ -17,6 +17,7 @@ the 5-hour / 490 MB limits.
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -51,8 +52,15 @@ def calc_bitrate(duration_sec: float, max_size_mb: int = MAX_SIZE_MB) -> int:
     return min(bitrate, DEFAULT_BITRATE)
 
 
+def natural_sort_key(path: str):
+    """Sort key that handles numbers naturally: 1, 2, 10 instead of 1, 10, 2."""
+    parts = re.split(r'(\d+)', path)
+    return [int(p) if p.isdigit() else p.lower() for p in parts]
+
+
 def find_media_files(input_dir: str, output_dir: str) -> list[str]:
-    """Recursively find all media files, excluding the output directory."""
+    """Recursively find all media files, excluding the output directory.
+    Uses natural sorting so files are ordered 1, 2, 3, ..., 10, 11 (not 1, 10, 11, 2)."""
     files = []
     output_dir_abs = os.path.abspath(output_dir)
     for root, _, filenames in os.walk(input_dir):
@@ -64,7 +72,7 @@ def find_media_files(input_dir: str, output_dir: str) -> list[str]:
             ext = os.path.splitext(fn)[1].lower()
             if ext in ALL_SUPPORTED:
                 files.append(os.path.join(root, fn))
-    files.sort()
+    files.sort(key=natural_sort_key)
     return files
 
 
