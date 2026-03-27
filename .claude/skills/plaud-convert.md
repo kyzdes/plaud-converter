@@ -1,11 +1,11 @@
 ---
 name: plaud-convert
-description: Convert video/audio files to MP3 for Plaud import, with optional merging into chunks. Use when user mentions Plaud, wants to convert lectures/recordings for transcription, or needs to batch-convert and merge media files with size/duration limits.
+description: Convert video/audio files to MP3 for Plaud import, with optional per-folder merging. Use when user mentions Plaud, wants to convert lectures/recordings for transcription, or needs to batch-convert and merge media files with size/duration limits. Merge groups files by source folder so each merged file = 1 topic/lecture.
 ---
 
 # Plaud Converter
 
-Convert media files to MP3 for import into Plaud, with optional merge into chunks.
+Convert media files to MP3 for import into Plaud, with per-folder merge.
 
 ## Plaud import constraints
 
@@ -16,7 +16,7 @@ Convert media files to MP3 for import into Plaud, with optional merge into chunk
 ## How to convert
 
 ```bash
-python3 convert.py <input_directory> [-o <output_directory>] [--max-size <MB>] [--merge] [--merge-prefix <name>] [-y]
+python3 convert.py <input_directory> [-o <output_directory>] [--max-size <MB>] [--merge] [-y]
 ```
 
 ### Convert only
@@ -25,28 +25,25 @@ python3 convert.py <input_directory> [-o <output_directory>] [--max-size <MB>] [
 python3 convert.py /path/to/lectures
 ```
 
-### Convert and merge into chunks
+### Convert and merge by folder
 
 ```bash
-python3 convert.py /path/to/lectures --merge --merge-prefix "course"
+python3 convert.py /path/to/lectures --merge
 ```
 
-Merged files are saved to `<output>/merged/` as `<prefix>_part1.mp3`, `<prefix>_part2.mp3`, etc. Each chunk stays within 5 hours and 490 MB.
+### Merge logic
+
+- **1 source folder = 1 merged file** (= 1 topic / 1 lecture)
+- Files within each folder are merged in natural sort order (1, 2, 3, ..., 10)
+- If a folder's total exceeds 5h or 490MB, it splits into `folder_part1.mp3`, `folder_part2.mp3`
+- Merged files are named after the source folder
+- Output goes to `<output>/merged/`
 
 ### Interactive mode (default)
 
-If `--merge` is not passed and `-y` is not set, the script will ask the user after conversion whether they want to merge the files.
-
-### What the script does
-
-1. Recursively finds all video/audio files in the input directory
-2. Skips macOS resource fork files (`._*`) and files over 5 hours
-3. Calculates optimal bitrate to keep each file under 490 MB
-4. Converts to MP3 using ffmpeg (audio only, no video)
-5. Prefixes filenames with subfolder names to avoid naming conflicts
-6. Optionally merges converted files into sequential chunks fitting Plaud limits
+If `--merge` is not passed and `-y` is not set, the script asks after conversion whether to merge.
 
 ### Requirements
 
-- Python 3.10+
+- Python 3.9+
 - ffmpeg (`brew install ffmpeg`)

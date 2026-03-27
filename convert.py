@@ -11,9 +11,11 @@ This script converts all media files in a directory (recursively) to MP3,
 targeting < 490 MB per file. Files already under limits are converted at 128kbps.
 Large files get a reduced bitrate to stay within the size limit.
 
-Optional merge mode: concatenates converted files into chunks fitting within
-the 5-hour / 490 MB limits.
+Merge mode: concatenates files per source folder (1 folder = 1 topic/lecture).
+If a folder exceeds 5h/490MB, it splits into numbered parts.
 """
+
+from __future__ import annotations
 
 import argparse
 import os
@@ -21,6 +23,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from collections import OrderedDict
 
 SUPPORTED_VIDEO = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".webm", ".m4v",
                    ".rmvb", ".rm", ".divx", ".ts", ".m2ts", ".3gp", ".f4v"}
@@ -74,6 +77,33 @@ def find_media_files(input_dir: str, output_dir: str) -> list[str]:
                 files.append(os.path.join(root, fn))
     files.sort(key=natural_sort_key)
     return files
+
+
+def group_by_source_folder(files: list[str], input_dir: str) -> OrderedDict:
+    """Group converted files by their source folder.
+    Converted files are named as '<folder>_<filename>.mp3'.
+    Returns OrderedDict[folder_name -> list[filepath]] in natural sort order."""
+    groups = {}
+    for fpath in files:
+        basename = os.path.basename(fpath)
+        # Extract folder prefix: everything before the last '_' that matches a known folder
+        # The naming convention is: <folder>_<original_name>.mp3
+        # For root-level files (no folder prefix): folder = "root"
+        parts = basename.split("_", 1)
+        if len(parts) == 2:
+            folder = parts[0]
+        else:
+            folder = "root"
+        if folder not in groups:
+            groups[folder] = []
+        groups[folder].append(fpath)
+
+    # Sort groups by folder name naturally, and files within each group
+    sorted_groups = OrderedDict()
+    for key in sorted(groups.keys(), key=natural_sort_key):
+        sorted_groups[key] = sorted(groups[key], key=lambda f: natural_sort_key(os.path.basename(f)))
+
+    return sorted_groups
 
 
 def make_unique_name(filepath: str, input_dir: str) -> str:
@@ -146,10 +176,10 @@ def convert(input_dir: str, output_dir: str, max_size_mb: int = MAX_SIZE_MB) -> 
     return converted
 
 
-def plan_merge_chunks(files: list[str], max_duration: float, max_size_mb: int) -> list[list[str]]:
-    """Split files into chunks that fit within duration and size limits."""
-    chunks: list[list[str]] = []
-    current_chunk: list[str] = []
+def plan_folder_chunks(files: list[str], max_duration: float, max_size_mb: int) -> list[list[str]]:
+    """Split a single folder's files into chunks that fit within duration and size limits."""
+    chunks = []
+    current_chunk = []
     current_duration = 0.0
     current_size_mb = 0.0
 
@@ -174,74 +204,92 @@ def plan_merge_chunks(files: list[str], max_duration: float, max_size_mb: int) -
     return chunks
 
 
-def merge_files(files: list[str], output_dir: str, prefix: str = "merged",
-                max_size_mb: int = MAX_SIZE_MB):
-    """Merge converted MP3 files into chunks fitting Plaud limits."""
+def concat_chunk(chunk: list[str], out_path: str) -> bool:
+    """Concatenate a list of MP3 files into one. Returns True on success."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
+        for f in chunk:
+            tmp.write(f"file '{f}'\n")
+        list_path = tmp.name
+
+    try:
+        # Try lossless concat first
+        result = subprocess.run(
+            ["ffmpeg", "-f", "concat", "-safe", "0", "-i", list_path,
+             "-c", "copy", "-y", out_path],
+            capture_output=True, text=True
+        )
+
+        if result.returncode != 0:
+            # Fallback: re-encode
+            result = subprocess.run(
+                ["ffmpeg", "-f", "concat", "-safe", "0", "-i", list_path,
+                 "-codec:a", "libmp3lame", "-b:a", "128k", "-y", out_path],
+                capture_output=True, text=True
+            )
+
+        if result.returncode != 0:
+            print(f"  ERROR: {result.stderr[-200:]}")
+            return False
+        return True
+    finally:
+        os.unlink(list_path)
+
+
+def merge_by_folder(files: list[str], input_dir: str, output_dir: str,
+                    max_size_mb: int = MAX_SIZE_MB):
+    """Merge converted files grouped by source folder.
+    1 folder = 1 merged file (= 1 topic/lecture).
+    If a folder exceeds limits, splits into parts."""
     if not files:
         print("No files to merge.")
         return
 
-    # Gather durations for summary
-    file_info = []
-    total_duration = 0.0
-    total_size = 0.0
-    for f in files:
-        dur = get_duration(f) or 0
-        size = os.path.getsize(f) / (1024 * 1024)
-        file_info.append((f, dur, size))
-        total_duration += dur
-        total_size += size
+    groups = group_by_source_folder(files, input_dir)
 
-    print(f"\nMerge: {len(files)} files, "
-          f"total duration {fmt_duration(total_duration)}, "
-          f"total size {total_size:.0f} MB")
-
-    chunks = plan_merge_chunks(files, MAX_DURATION_SEC, max_size_mb)
-    print(f"Will produce {len(chunks)} merged file(s)\n")
+    total_files = sum(len(v) for v in groups.values())
+    print(f"\nMerge by folder: {total_files} files across {len(groups)} folder(s)")
 
     merged_dir = os.path.join(output_dir, "merged")
     os.makedirs(merged_dir, exist_ok=True)
 
-    for i, chunk in enumerate(chunks, 1):
-        chunk_duration = sum(get_duration(f) or 0 for f in chunk)
-        chunk_size = sum(os.path.getsize(f) / (1024 * 1024) for f in chunk)
-        out_path = os.path.join(merged_dir, f"{prefix}_part{i}.mp3")
+    merged_count = 0
+    for folder_name, folder_files in groups.items():
+        folder_dur = sum(get_duration(f) or 0 for f in folder_files)
+        folder_size = sum(os.path.getsize(f) / (1024 * 1024) for f in folder_files)
 
-        print(f"[Part {i}/{len(chunks)}] {len(chunk)} files, "
-              f"{fmt_duration(chunk_duration)}, ~{chunk_size:.0f} MB")
+        print(f"\n[{folder_name}] {len(folder_files)} files, "
+              f"{fmt_duration(folder_dur)}, {folder_size:.0f} MB")
 
-        # Create concat list file
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
-            for f in chunk:
-                tmp.write(f"file '{f}'\n")
-            list_path = tmp.name
+        chunks = plan_folder_chunks(folder_files, MAX_DURATION_SEC, max_size_mb)
 
-        try:
-            result = subprocess.run(
-                ["ffmpeg", "-f", "concat", "-safe", "0", "-i", list_path,
-                 "-c", "copy", "-y", out_path],
-                capture_output=True, text=True
-            )
+        for ci, chunk in enumerate(chunks):
+            chunk_dur = sum(get_duration(f) or 0 for f in chunk)
+            chunk_size = sum(os.path.getsize(f) / (1024 * 1024) for f in chunk)
 
-            if result.returncode != 0:
-                # Fallback: re-encode if concat copy fails (mixed formats/params)
-                result = subprocess.run(
-                    ["ffmpeg", "-f", "concat", "-safe", "0", "-i", list_path,
-                     "-codec:a", "libmp3lame", "-b:a", "128k", "-y", out_path],
-                    capture_output=True, text=True
-                )
-
-            if result.returncode != 0:
-                print(f"  ERROR: {result.stderr[-200:]}")
+            if len(chunks) == 1:
+                out_name = f"{folder_name}.mp3"
             else:
-                final_size = os.path.getsize(out_path) / (1024 * 1024)
-                final_dur = get_duration(out_path) or 0
-                print(f"  OK -> {os.path.basename(out_path)} "
-                      f"({fmt_duration(final_dur)}, {final_size:.1f} MB)")
-        finally:
-            os.unlink(list_path)
+                out_name = f"{folder_name}_part{ci + 1}.mp3"
 
-    print(f"\nMerged files saved to: {merged_dir}")
+            out_path = os.path.join(merged_dir, out_name)
+
+            if len(chunk) == 1:
+                # Single file — just copy
+                import shutil
+                shutil.copy2(chunk[0], out_path)
+                ok = True
+            else:
+                ok = concat_chunk(chunk, out_path)
+
+            if ok:
+                final_dur = get_duration(out_path) or 0
+                final_size = os.path.getsize(out_path) / (1024 * 1024)
+                part_label = f" (part {ci + 1}/{len(chunks)})" if len(chunks) > 1 else ""
+                print(f"  -> {out_name}{part_label}: "
+                      f"{fmt_duration(final_dur)}, {final_size:.1f} MB")
+                merged_count += 1
+
+    print(f"\nMerged {merged_count} file(s) -> {merged_dir}")
 
 
 def main():
@@ -253,9 +301,7 @@ def main():
     parser.add_argument("--max-size", type=int, default=MAX_SIZE_MB,
                         help=f"Max output file size in MB (default: {MAX_SIZE_MB})")
     parser.add_argument("--merge", action="store_true",
-                        help="Merge converted files into chunks fitting Plaud limits")
-    parser.add_argument("--merge-prefix", default="merged",
-                        help="Prefix for merged filenames (default: 'merged')")
+                        help="Merge converted files by folder (1 folder = 1 topic)")
     parser.add_argument("-y", "--yes", action="store_true",
                         help="Skip interactive prompts")
     args = parser.parse_args()
@@ -273,13 +319,12 @@ def main():
         return
 
     if args.merge:
-        merge_files(converted, output_dir, args.merge_prefix, args.max_size)
+        merge_by_folder(converted, input_dir, output_dir, args.max_size)
     elif not args.yes:
         print()
-        answer = input("Merge converted files into chunks for Plaud? [y/N] ").strip().lower()
+        answer = input("Merge files by folder (1 folder = 1 topic)? [y/N] ").strip().lower()
         if answer in ("y", "yes", "д", "да"):
-            merge_prefix = input("Prefix for merged files [merged]: ").strip() or "merged"
-            merge_files(converted, output_dir, merge_prefix, args.max_size)
+            merge_by_folder(converted, input_dir, output_dir, args.max_size)
 
 
 if __name__ == "__main__":
