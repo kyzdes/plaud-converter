@@ -1,11 +1,11 @@
 ---
 name: plaud-convert
-description: Convert video/audio files to MP3 for Plaud import. Use when user mentions Plaud, wants to convert lectures/recordings for transcription, or needs to batch-convert media files with size limits.
+description: Convert video/audio files to MP3 for Plaud import, with optional merging into chunks. Use when user mentions Plaud, wants to convert lectures/recordings for transcription, or needs to batch-convert and merge media files with size/duration limits.
 ---
 
 # Plaud Converter
 
-Convert media files to MP3 for import into Plaud.
+Convert media files to MP3 for import into Plaud, with optional merge into chunks.
 
 ## Plaud import constraints
 
@@ -15,32 +15,36 @@ Convert media files to MP3 for import into Plaud.
 
 ## How to convert
 
-Run the converter script:
-
 ```bash
-python3 convert.py <input_directory> [-o <output_directory>] [--max-size <MB>]
+python3 convert.py <input_directory> [-o <output_directory>] [--max-size <MB>] [--merge] [--merge-prefix <name>] [-y]
 ```
 
-### Examples
+### Convert only
 
-Convert all files in a folder (output goes to `<input>/converted/`):
 ```bash
 python3 convert.py /path/to/lectures
 ```
 
-Custom output directory:
+### Convert and merge into chunks
+
 ```bash
-python3 convert.py /path/to/lectures -o /path/to/output
+python3 convert.py /path/to/lectures --merge --merge-prefix "course"
 ```
+
+Merged files are saved to `<output>/merged/` as `<prefix>_part1.mp3`, `<prefix>_part2.mp3`, etc. Each chunk stays within 5 hours and 490 MB.
+
+### Interactive mode (default)
+
+If `--merge` is not passed and `-y` is not set, the script will ask the user after conversion whether they want to merge the files.
 
 ### What the script does
 
 1. Recursively finds all video/audio files in the input directory
-2. Skips macOS resource fork files (`._*`)
-3. Checks duration — skips files over 5 hours
-4. Calculates optimal bitrate to keep each file under 490 MB
-5. Converts to MP3 using ffmpeg (audio only, no video)
-6. Prefixes filenames with subfolder names to avoid naming conflicts
+2. Skips macOS resource fork files (`._*`) and files over 5 hours
+3. Calculates optimal bitrate to keep each file under 490 MB
+4. Converts to MP3 using ffmpeg (audio only, no video)
+5. Prefixes filenames with subfolder names to avoid naming conflicts
+6. Optionally merges converted files into sequential chunks fitting Plaud limits
 
 ### Requirements
 

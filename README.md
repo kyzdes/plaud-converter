@@ -1,6 +1,6 @@
 # plaud-converter
 
-Batch convert video/audio files to MP3 for import into [Plaud](https://www.plaud.ai/).
+Batch convert video/audio files to MP3 for import into [Plaud](https://www.plaud.ai/), with optional merging into chunks.
 
 ## Plaud import limits
 
@@ -25,14 +25,25 @@ brew install ffmpeg  # macOS
 # Convert all media files in a folder
 python3 convert.py /path/to/lectures
 
-# Custom output directory
-python3 convert.py /path/to/lectures -o ~/Desktop/output
+# Convert and automatically merge into chunks
+python3 convert.py /path/to/lectures --merge
 
-# Custom max file size (default: 490 MB)
-python3 convert.py /path/to/lectures --max-size 400
+# Custom output directory + merge with prefix
+python3 convert.py /path/to/lectures -o ~/output --merge --merge-prefix "course"
+
+# Non-interactive (skip merge prompt)
+python3 convert.py /path/to/lectures -y
 ```
 
-Output goes to `<input_dir>/converted/` by default.
+## Flags
+
+| Flag | Description |
+|---|---|
+| `-o`, `--output` | Output directory (default: `<input_dir>/converted/`) |
+| `--max-size` | Max file size in MB (default: 490) |
+| `--merge` | Merge converted files into chunks fitting Plaud limits |
+| `--merge-prefix` | Prefix for merged filenames (default: `merged`) |
+| `-y`, `--yes` | Skip interactive prompts |
 
 ## How it works
 
@@ -41,6 +52,15 @@ Output goes to `<input_dir>/converted/` by default.
 3. Calculates the optimal bitrate to keep each file under the size limit
 4. Converts to MP3 (audio only) via ffmpeg at up to 128 kbps
 5. Prefixes output filenames with subfolder names to prevent collisions
+
+### Merge mode
+
+When `--merge` is passed (or confirmed interactively after conversion):
+
+- Groups converted files sequentially into chunks
+- Each chunk fits within **5 hours** and **490 MB**
+- Saves to `<output>/merged/` as `<prefix>_part1.mp3`, `<prefix>_part2.mp3`, ...
+- Uses lossless concat when possible, falls back to re-encoding if needed
 
 ## Claude Code skill
 

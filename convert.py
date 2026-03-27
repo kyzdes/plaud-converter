@@ -10,12 +10,16 @@ Plaud import constraints:
 This script converts all media files in a directory (recursively) to MP3,
 targeting < 490 MB per file. Files already under limits are converted at 128kbps.
 Large files get a reduced bitrate to stay within the size limit.
+
+Optional merge mode: concatenates converted files into chunks fitting within
+the 5-hour / 490 MB limits.
 """
 
 import argparse
 import os
 import subprocess
 import sys
+import tempfile
 
 SUPPORTED_VIDEO = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".webm", ".m4v",
                    ".rmvb", ".rm", ".divx", ".ts", ".m2ts", ".3gp", ".f4v"}
@@ -74,18 +78,27 @@ def make_unique_name(filepath: str, input_dir: str) -> str:
     return f"{rel_dir}_{base_name}.mp3"
 
 
-def convert(input_dir: str, output_dir: str, max_size_mb: int = MAX_SIZE_MB):
-    """Convert all media files to MP3 for Plaud import."""
+def fmt_duration(seconds: float) -> str:
+    """Format seconds as HH:MM:SS."""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    return f"{h}:{m:02d}:{s:02d}"
+
+
+def convert(input_dir: str, output_dir: str, max_size_mb: int = MAX_SIZE_MB) -> list[str]:
+    """Convert all media files to MP3 for Plaud import. Returns list of converted file paths."""
     os.makedirs(output_dir, exist_ok=True)
     files = find_media_files(input_dir, output_dir)
 
     if not files:
         print("No media files found.")
-        return
+        return []
 
     total = len(files)
     print(f"Found {total} media file(s)\n")
 
+    converted = []
     errors = []
     for i, fpath in enumerate(files, 1):
         rel = os.path.relpath(fpath, input_dir)
@@ -114,12 +127,113 @@ def convert(input_dir: str, output_dir: str, max_size_mb: int = MAX_SIZE_MB):
         else:
             size_mb = os.path.getsize(out_path) / (1024 * 1024)
             print(f"  OK ({size_mb:.1f} MB)")
+            converted.append(out_path)
 
-    print(f"\nDone! {total - len(errors)}/{total} converted -> {output_dir}")
+    print(f"\nDone! {len(converted)}/{total} converted -> {output_dir}")
     if errors:
         print("\nFailed:")
         for name, reason in errors:
             print(f"  - {name}: {reason}")
+
+    return converted
+
+
+def plan_merge_chunks(files: list[str], max_duration: float, max_size_mb: int) -> list[list[str]]:
+    """Split files into chunks that fit within duration and size limits."""
+    chunks: list[list[str]] = []
+    current_chunk: list[str] = []
+    current_duration = 0.0
+    current_size_mb = 0.0
+
+    for fpath in files:
+        duration = get_duration(fpath) or 0
+        size_mb = os.path.getsize(fpath) / (1024 * 1024)
+
+        if current_chunk and (current_duration + duration > max_duration
+                              or current_size_mb + size_mb > max_size_mb):
+            chunks.append(current_chunk)
+            current_chunk = []
+            current_duration = 0.0
+            current_size_mb = 0.0
+
+        current_chunk.append(fpath)
+        current_duration += duration
+        current_size_mb += size_mb
+
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    return chunks
+
+
+def merge_files(files: list[str], output_dir: str, prefix: str = "merged",
+                max_size_mb: int = MAX_SIZE_MB):
+    """Merge converted MP3 files into chunks fitting Plaud limits."""
+    if not files:
+        print("No files to merge.")
+        return
+
+    # Gather durations for summary
+    file_info = []
+    total_duration = 0.0
+    total_size = 0.0
+    for f in files:
+        dur = get_duration(f) or 0
+        size = os.path.getsize(f) / (1024 * 1024)
+        file_info.append((f, dur, size))
+        total_duration += dur
+        total_size += size
+
+    print(f"\nMerge: {len(files)} files, "
+          f"total duration {fmt_duration(total_duration)}, "
+          f"total size {total_size:.0f} MB")
+
+    chunks = plan_merge_chunks(files, MAX_DURATION_SEC, max_size_mb)
+    print(f"Will produce {len(chunks)} merged file(s)\n")
+
+    merged_dir = os.path.join(output_dir, "merged")
+    os.makedirs(merged_dir, exist_ok=True)
+
+    for i, chunk in enumerate(chunks, 1):
+        chunk_duration = sum(get_duration(f) or 0 for f in chunk)
+        chunk_size = sum(os.path.getsize(f) / (1024 * 1024) for f in chunk)
+        out_path = os.path.join(merged_dir, f"{prefix}_part{i}.mp3")
+
+        print(f"[Part {i}/{len(chunks)}] {len(chunk)} files, "
+              f"{fmt_duration(chunk_duration)}, ~{chunk_size:.0f} MB")
+
+        # Create concat list file
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
+            for f in chunk:
+                tmp.write(f"file '{f}'\n")
+            list_path = tmp.name
+
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-f", "concat", "-safe", "0", "-i", list_path,
+                 "-c", "copy", "-y", out_path],
+                capture_output=True, text=True
+            )
+
+            if result.returncode != 0:
+                # Fallback: re-encode if concat copy fails (mixed formats/params)
+                result = subprocess.run(
+                    ["ffmpeg", "-f", "concat", "-safe", "0", "-i", list_path,
+                     "-codec:a", "libmp3lame", "-b:a", "128k", "-y", out_path],
+                    capture_output=True, text=True
+                )
+
+            if result.returncode != 0:
+                print(f"  ERROR: {result.stderr[-200:]}")
+            else:
+                final_size = os.path.getsize(out_path) / (1024 * 1024)
+                final_dur = get_duration(out_path) or 0
+                print(f"  OK -> {os.path.basename(out_path)} "
+                      f"({fmt_duration(final_dur)}, {final_size:.1f} MB)")
+        finally:
+            os.unlink(list_path)
+
+    print(f"\nMerged files saved to: {merged_dir}")
 
 
 def main():
@@ -130,6 +244,12 @@ def main():
     parser.add_argument("-o", "--output", help="Output directory (default: <input_dir>/converted)")
     parser.add_argument("--max-size", type=int, default=MAX_SIZE_MB,
                         help=f"Max output file size in MB (default: {MAX_SIZE_MB})")
+    parser.add_argument("--merge", action="store_true",
+                        help="Merge converted files into chunks fitting Plaud limits")
+    parser.add_argument("--merge-prefix", default="merged",
+                        help="Prefix for merged filenames (default: 'merged')")
+    parser.add_argument("-y", "--yes", action="store_true",
+                        help="Skip interactive prompts")
     args = parser.parse_args()
 
     input_dir = os.path.abspath(args.input_dir)
@@ -139,7 +259,19 @@ def main():
         print(f"Error: {input_dir} is not a directory")
         sys.exit(1)
 
-    convert(input_dir, output_dir, args.max_size)
+    converted = convert(input_dir, output_dir, args.max_size)
+
+    if not converted:
+        return
+
+    if args.merge:
+        merge_files(converted, output_dir, args.merge_prefix, args.max_size)
+    elif not args.yes:
+        print()
+        answer = input("Merge converted files into chunks for Plaud? [y/N] ").strip().lower()
+        if answer in ("y", "yes", "д", "да"):
+            merge_prefix = input("Prefix for merged files [merged]: ").strip() or "merged"
+            merge_files(converted, output_dir, merge_prefix, args.max_size)
 
 
 if __name__ == "__main__":
