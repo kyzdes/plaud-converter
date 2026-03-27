@@ -1,11 +1,11 @@
 ---
 name: plaud-convert
-description: Convert video/audio files to MP3 for Plaud import, with optional per-folder merging. Use when user mentions Plaud, wants to convert lectures/recordings for transcription, or needs to batch-convert and merge media files with size/duration limits. Merge groups files by source folder so each merged file = 1 topic/lecture.
+description: Convert video/audio files to MP3 for Plaud import, with per-folder merging and HTML reporting. Use when user mentions Plaud, wants to convert lectures/recordings for transcription, or needs to batch-convert and merge media files with size/duration limits. Merge groups files by source folder so each merged file = 1 topic/lecture. Report shows full statistics with source/converted/merged breakdowns.
 ---
 
 # Plaud Converter
 
-Convert media files to MP3 for import into Plaud, with per-folder merge.
+Convert media files to MP3 for import into Plaud, with per-folder merge and HTML report.
 
 ## Plaud import constraints
 
@@ -13,35 +13,50 @@ Convert media files to MP3 for import into Plaud, with per-folder merge.
 - **Max file length**: 5 hours
 - **Max file size**: 500 MB (target 490 MB for safety margin)
 
-## How to convert
+## How to use
 
 ```bash
-python3 convert.py <input_directory> [-o <output_directory>] [--max-size <MB>] [--merge] [-y]
+python3 convert.py <input_directory> [-o <output_dir>] [--merge] [--report] [--no-open] [-y]
 ```
 
-### Convert only
+### Convert, merge by folder, and generate report
 
 ```bash
-python3 convert.py /path/to/lectures
+python3 convert.py /path/to/lectures --merge --report
 ```
 
-### Convert and merge by folder
+### Flags
 
-```bash
-python3 convert.py /path/to/lectures --merge
-```
+| Flag | Description |
+|---|---|
+| `--merge` | Merge converted files by folder (1 folder = 1 topic) |
+| `--report` | Generate HTML report with full statistics |
+| `--no-open` | Don't auto-open the report in browser |
+| `-y` | Skip interactive prompts |
+| `-o` | Custom output directory |
+| `--max-size` | Max file size in MB (default: 490) |
 
 ### Merge logic
 
 - **1 source folder = 1 merged file** (= 1 topic / 1 lecture)
 - Files within each folder are merged in natural sort order (1, 2, 3, ..., 10)
-- If a folder's total exceeds 5h or 490MB, it splits into `folder_part1.mp3`, `folder_part2.mp3`
-- Merged files are named after the source folder
+- If a folder exceeds 5h or 490MB, splits into `folder_part1.mp3`, `folder_part2.mp3`
 - Output goes to `<output>/merged/`
+
+### HTML Report
+
+The report includes:
+- Summary cards: source/converted/merged counts, sizes, compression ratio
+- Folders vs merged match check (1:1 mapping validation)
+- Per-topic merged file cards with duration/size progress bars
+- Source folder breakdown table
+- Full source and converted file listings
 
 ### Interactive mode (default)
 
-If `--merge` is not passed and `-y` is not set, the script asks after conversion whether to merge.
+Without `--merge`/`--report`/`-y`, the script prompts after each step:
+1. After conversion: "Merge files by folder?"
+2. After merge: "Generate HTML report?"
 
 ### Requirements
 
